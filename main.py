@@ -78,7 +78,7 @@ def parse_shelly_response(data) -> ShellyResponse:
                 return ShellyResponse()
 
         resp = response.get('params', {})
-        temp = resp.get('temprature:0', {}).get("tC")
+        temp = resp.get('temperature:0', {}).get("tC")
         humid = resp.get('humidity:0', {}).get("rh")
 
         if temp is not None and humid is not None:
