@@ -66,7 +66,7 @@ def parse_shelly_response(data) -> ShellyResponse:
                 log.info(f"got status: {response}")
 
                 if 'shellyplusplugs' in response.get('src'):
-                    power = response.get('params', {}).get('switch:0', {}).get('apower', {})
+                    power = response.get('params', {}).get('switch:0', {}).get('apower')
                     if power is not None:
                         return ShellyResponse(ResponseType.POWER, response['src'], power_consumption=power)
 
