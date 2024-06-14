@@ -76,9 +76,13 @@ def parse_shelly_response(data) -> ShellyResponse:
                 return ShellyResponse()
 
         resp = response.get('params', {})
-        temp = resp.get('temprature:0')["tC"]
-        humid = resp.get('humidity:0')["rh"]
-        return ShellyResponse(ResponseType.ENVIRONMENT, response['src'], temp, humid, power_consumption=0)
+        temp = resp.get('temprature:0', {}).get("tC")
+        humid = resp.get('humidity:0', {}).get("rh")
+
+        if temp is not None and humid is not None:
+            return ShellyResponse(ResponseType.ENVIRONMENT, response['src'], temp, humid, power_consumption=0)
+
+        return ShellyResponse()
 
     except Exception as e:
         # log.exception(f"Error parsing Shelly response: {e}")
@@ -90,7 +94,7 @@ def process_response() -> None:
         data, address = sock.recvfrom(1024)
         measurement: ShellyResponse = parse_shelly_response(data)
 
-        match ResponseType(measurement.type):
+        match measurement.type:
             case ResponseType.FAILURE:
                 pass
 
