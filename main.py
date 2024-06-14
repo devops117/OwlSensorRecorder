@@ -1,8 +1,15 @@
-import json
-import socket
-import influxdb_client
-from dotenv import load_dotenv
 import os
+from dataclasses import dataclass
+import socket
+from enum import StrEnum
+import logging
+import json
+
+from dotenv import load_dotenv
+import influxdb_client
+
+# setup a basicLoger
+log = logging.getLogger()
 
 # Load environment variables from .env file
 load_dotenv()
@@ -15,47 +22,6 @@ INFLUXDB_ORGANIZATION = os.getenv('INFLUXDB_ORGANIZATION')
 INFLUXDB_BUCKET = os.getenv('INFLUXDB_BUCKET')
 SHELLY_PORT = int(os.getenv('SHELLY_PORT'))
 
-
-class ShellyResponse:
-    def __init__(self, response_type: str = "Failure", source: str = "", temperature: float = 0.0,
-                 humidity_level: float = 0.0, power_consumption: float = 0.0) -> object:
-        self.type: str = response_type
-        self.src: str = source
-        self.temp: float = temperature
-        self.humidity: float = humidity_level
-        self.power: float = power_consumption
-
-
-# Function to parse Shelly's RPC response
-def parse_shelly_response(data) -> ShellyResponse:
-
-    try:
-        data = data.decode('utf-8')
-        response = json.loads(data)
-        if (response['method'] == "NotifyStatus"):
-            print(f"got status: {response}")
-
-            if 'shellyplusplugs' in response.get('src'):
-                power = response.get('params').get('switch:0').get('apower')
-                if power is None:
-                    return ShellyResponse()
-
-                return ShellyResponse('power', response['src'], 0.0, 0.0, power)
-
-            return ShellyResponse()
-        elif response['method'] == 'NotifyEvent':
-            return ShellyResponse()
-
-        resp = response.get('params', {}).get('temperature:0')
-        temp = resp["tC"]
-        resp2 = response.get('params', {}).get('humidity:0')
-        hum = resp2["rh"]
-        return ShellyResponse('environment', response['src'], temp, hum, 0)
-    except Exception as e:
-        # print(f"Error parsing Shelly response: {e}")
-        return ShellyResponse()
-
-
 # InfluxDB client setup
 client = influxdb_client.InfluxDBClient(
     url=f"http://{INFLUXDB_HOST}:{INFLUXDB_PORT}",
@@ -65,37 +31,107 @@ client = influxdb_client.InfluxDBClient(
 
 # UDP socket setup
 sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-sock.bind(("", SHELLY_PORT))
+sock.bind(tuple("", SHELLY_PORT))
 
-while True:
+
+class ResponseType(StrEnum):
+    FAILURE = "failure"
+    POWER = "power"
+    ENVIRONMENT = "environment"
+
+
+@dataclass(slots=True)
+class ShellyResponse:
+    response_type: str = ResponseType.FAILURE
+    source: str = ""
+    temperature: float = 0.0
+    humidity_level: float = 0.0
+    power_consumption: float = 0.0
+
+    def __str__(self) -> str:
+        return (f"response_type: {str(self.response_type)}" +
+            f"\nsource: {self.source}" +
+            f"\ntemperature: {self.temperature}°C}" +
+            f"\nhumidity_level: {self.humidity_level}%rh" +
+            f"\npower_consumption: {self.power_consumption}W")
+
+
+# Function to parse Shelly's RPC response
+def parse_shelly_response(data) -> ShellyResponse:
     try:
-        data, address = sock.recvfrom(1024)
-        Measurement: ShellyResponse = parse_shelly_response(data)
+        data = data.decode('utf-8')
+        response = json.loads(data)
+        match response["method"]:
+            case "NotifyStatus":
+                log.info(f"got status: {response}")
 
-        if Measurement.type == 'Failure':
-            pass
+                if 'shellyplusplugs' in response.get('src'):
+                    power = response.get('params', {}).get('switch:0', {}).get('apower', {})
+                    if power is not None:
+                        return ShellyResponse(ResponseType.POWER, response['src'], power_consumption=power)
 
-        elif Measurement.type == 'environment':
-            if Measurement.temp is not None:
-                # Write temperature to InfluxDB
-                # Write temperature to InfluxDB
-                point_temp = influxdb_client.Point("shelly_h_t").tag("sensor", Measurement.src).field("temperature",
-                                                                                                      Measurement.temp)
-                point_hum = influxdb_client.Point("shelly_h_t").tag("sensor", Measurement.src).field("humidity",
-                                                                                                     Measurement.humidity)
-                write_api = client.write_api()
-                write_api.write(org=INFLUXDB_ORGANIZATION, bucket=INFLUXDB_BUCKET, record=[point_temp, point_hum])
+                return ShellyResponse()
 
-                print(f"Received temperature: {Measurement.temp}°C and {Measurement.humidity}%rh")
+            case "NotifyEvent":
+                return ShellyResponse()
 
-        elif Measurement.type == 'power':
-            point_power = influxdb_client.Point("shelly_h_t").tag("sensor", Measurement.src).field("power",
-                                                                                                   Measurement.power)
-            write_api = client.write_api()
-            
-            write_api.write(org=INFLUXDB_ORGANIZATION, bucket=INFLUXDB_BUCKET, record=point_power)
-
-            print(f'Received Power from {Measurement.src} of {Measurement.power}W')
+        resp = response.get('params', {})
+        temp = resp.get('temprature:0')["tC"]
+        humid = resp.get('humidity:0')["rh"]
+        return ShellyResponse(ResponseType.ENVIRONMENT, response['src'], temp, humid, power_consumption=0)
 
     except Exception as e:
-        print(e)
+        # log.exception(f"Error parsing Shelly response: {e}")
+        return ShellyResponse()
+
+
+def process_response() -> None:
+    try:
+        data, address = sock.recvfrom(1024)
+        measurement: ShellyResponse = parse_shelly_response(data)
+
+        match ResponseType(measurement.type):
+            case ResponseType.FAILURE:
+                pass
+
+            case ResponseType.ENVIRONMENT:
+                if measurement.temp is not None:
+                    # Write temperature to InfluxDB
+                    # Write temperature to InfluxDB
+                    point = influxdb_client.Point("shelly_h_t").tag("sensor", measurement.src)
+                    point_temp = point.field("temperature", measurement.temp)
+                    point_humid = point.field("humidity", measurement.humidity)
+
+                    write_api = client.write_api()
+                    write_api.write(
+                        org=INFLUXDB_ORGANIZATION,
+                        bucket=INFLUXDB_BUCKET,
+                        record=[point_temp, point_humid],
+                    )
+
+                    log.info(f"Received temperature: {measurement.temp}°C and {measurement.humidity}%rh")
+
+            case ResponseType.POWER:
+                point = influxdb_client.Point("shelly_h_t").tag("sensor", measurement.src)
+                point_power = point.field("power", measurement.power)
+
+                write_api = client.write_api()
+                write_api.write(
+                    org=INFLUXDB_ORGANIZATION,
+                    bucket=INFLUXDB_BUCKET,
+                    record=point_power,
+                )
+
+                log.info(f'Received Power from {measurement.src} of {measurement.power}W')
+
+    except Exception as e:
+        log.exception(e)
+
+
+def main() -> None:
+    while True:
+        process_response()
+
+
+if __name__ = "__main__":
+    main()
