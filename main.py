@@ -33,7 +33,8 @@ client = influxdb_client.InfluxDBClient(
 
 # UDP socket setup
 sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-sock.bind(('', SHELLY_PORT))
+addr = ('', SHELLY_PORT)
+sock.bind(addr)
 
 
 class ResponseType(StrEnum):
@@ -58,8 +59,14 @@ class ShellyResponse:
                 f"\npower_consumption: {self.power_consumption}W")
 
 
-# Function to parse Shelly's RPC response
 def parse_shelly_response(data) -> ShellyResponse:
+    """
+    Parse Shelly RPC response
+
+    return ShellyResponse object with attributes set,
+    if the parameters are available,
+    otherwise, return ShellyResponse object with default attributes
+    """
     try:
         data = data.decode('utf-8')
         response = json.loads(data)
@@ -82,7 +89,7 @@ def parse_shelly_response(data) -> ShellyResponse:
         humid = resp.get('humidity:0', {}).get("rh")
 
         if temp is not None and humid is not None:
-            return ShellyResponse(ResponseType.ENVIRONMENT, response['src'], temp, humid, power_consumption=0.0)
+            return ShellyResponse(ResponseType.ENVIRONMENT, response['src'], temp, humid)
 
         return ShellyResponse()
 
@@ -101,26 +108,23 @@ def process_response() -> None:
                 pass
 
             case ResponseType.ENVIRONMENT:
-                if measurement.temperature is not None:
-                    # Write temperature to InfluxDB
-                    # Write temperature to InfluxDB
-                    point = influxdb_client.Point("shelly_h_t").tag("sensor", measurement.source)
-                    point_temp = point.field("temperature", measurement.temperature)
-                    point_humid = point.field("humidity", measurement.humidity_level)
-                    with client.write_api(write_options=SYNCHRONOUS) as writer:
-                        writer.write(bucket=INFLUXDB_BUCKET, record=[point_temp, point_humid])
+                # Write temperature to InfluxDB
+                # Write humidity_level to InfluxDB
+                point = influxdb_client.Point("shelly_h_t").tag("sensor", measurement.source)
+                point_temp = point.field("temperature", measurement.temperature)
+                point_humid = point.field("humidity", measurement.humidity_level)
 
-                    log.info(f"Received temperature: {measurement.temperature}°C and {measurement.humidity_level}%rh")
+                with client.write_api(write_options=SYNCHRONOUS) as writer:
+                    writer.write(bucket=INFLUXDB_BUCKET, record=[point_temp, point_humid])
+
+                log.info(f"Received temperature: {measurement.temperature}°C and {measurement.humidity_level}%rh")
 
             case ResponseType.POWER:
                 point = influxdb_client.Point("shelly_h_t").tag("sensor", measurement.source)
                 point_power = point.field("power", measurement.power_consumption)
 
                 with client.write_api(write_options=SYNCHRONOUS) as writer:
-                    writer.write(org=INFLUXDB_ORGANIZATION,
-                                 bucket=INFLUXDB_BUCKET,
-                                 record=point_power,
-                                 )
+                    writer.write(bucket=INFLUXDB_BUCKET, record=point_power)
 
                 log.info(f'Received Power from {measurement.source} of {measurement.power_consumption}W')
 
